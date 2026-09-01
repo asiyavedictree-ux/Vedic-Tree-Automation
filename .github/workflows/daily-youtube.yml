@@ -1,0 +1,42 @@
+name: Daily YouTube Preschool Updates
+
+on:
+  schedule:
+    # 01:00 UTC = 06:30 Asia/Kolkata. GitHub schedules can be delayed.
+    - cron: '0 1 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vedic-tree-youtube-collector
+  cancel-in-progress: false
+
+jobs:
+  collect:
+    if: github.repository == 'asiyavedictree-ux/Vedic-Tree-Automation'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Test collector without credentials
+        run: node --test tests/daily-youtube.test.mjs
+      - name: Collect and verify YouTube signals
+        env:
+          YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: node scripts/daily-youtube.mjs
+      - name: Write run summary
+        if: always()
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          echo "YouTube collector result: $JOB_STATUS" >> "$GITHUB_STEP_SUMMARY"
+          echo "YouTube only. Instagram, audio, approvals and dashboard code are unchanged." >> "$GITHUB_STEP_SUMMARY"
