@@ -1,12 +1,35 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildSignals, client, configuration, durationSeconds, metricUpdate, run } from '../scripts/daily-youtube.mjs';
+import { buildSignals, client, configuration, durationSeconds, metricUpdate, run, searchQueries } from '../scripts/daily-youtube.mjs';
 
 const now = new Date('2026-09-01T01:00:00Z');
 const first = 'abcdefghijk';
 const second = 'ABCDEFGHIJK';
 const search = id => ({ id: { videoId: id } });
-const video = (id, views = 5000) => ({ id, snippet: { title: 'Preschool classroom craft', description: 'teacher activity', channelTitle: 'School', publishedAt: '2026-08-31T01:00:00Z' }, statistics: { viewCount: String(views), likeCount: '50', commentCount: '10' }, contentDetails: { duration: 'PT45S' } });
+const video = (id, views = 5000) => ({ id, snippet: { title: 'Preschool classroom craft', description: 'teacher activity', channelTitle: 'School', publishedAt: '2026-08-31T20:00:00Z' }, statistics: { viewCount: String(views), likeCount: '50', commentCount: '10' }, contentDetails: { duration: 'PT45S' } });
+
+test('relevant zero-view learning videos qualify with balanced activity and celebration searches', () => {
+  const v = video(first,0);
+  v.snippet.title = 'Preschool alphabet learning game';
+  assert.equal(buildSignals([search(first)],[v],now)[0].qualified,true);
+  assert.equal(searchQueries(now).length,3);
+  assert.match(searchQueries(now)[2],/preschool celebration/);
+  assert.doesNotMatch(searchQueries(new Date('2026-09-06T01:00:00Z'))[2],/teachers day/);
+});
+
+test('multiple searches deduplicate IDs and video detail requests are batched at fifty', async () => {
+  const ids = Array.from({length:75},(_,i)=>String(i).padStart(11,'0'));
+  const {api} = mockApi();
+  let searches = 0;
+  const batches = [];
+  api.youtube = async (endpoint,params) => {
+    if(endpoint === 'search') return {items:ids.slice(searches++ *25,searches*25).map(search)};
+    const batch = params.id.split(','); batches.push(batch.length);
+    return {items:batch.map(id=>video(id,0))};
+  };
+  assert.equal((await run(api,now,()=>{})).processed,75);
+  assert.deepEqual(batches,[50,25]);
+});
 
 test('statistics join by video ID, deduplicate, preserve source title', () => {
   const records = buildSignals([search(first), search(second), search(first)], [video(second, 9000), video(first, 5000)], now);
@@ -91,9 +114,16 @@ test('verification failure records FAILED, never SUCCESS', async () => {
   assert.equal(writes.at(-1).body.status, 'FAILED');
   assert.equal(writes.some(w => w.body?.status === 'SUCCESS'), false);
 });
-test('empty upstream data fails without signal writes', async () => {
+test('successful empty searches record zero matches without inserting older content', async () => {
   const { api, writes } = mockApi({ empty: true });
-  await assert.rejects(run(api, now, () => {}), /No YouTube results/);
+  assert.deepEqual(await run(api, now, () => {}),{processed:0,newCandidates:0});
   assert.equal(writes.some(w => w.table === 'trend_signals'), false);
-  assert.equal(writes.at(-1).body.status, 'FAILED');
+  assert.equal(writes.at(-1).body.status, 'SUCCESS');
+});
+
+test('yesterday uploads are excluded even when discovered today', () => {
+  const v=video(first); v.snippet.publishedAt='2026-08-31T18:29:59Z';
+  assert.deepEqual(buildSignals([search(first)],[v],now),[]);
+  v.snippet.publishedAt='2026-08-31T18:30:00Z';
+  assert.equal(buildSignals([search(first)],[v],now).length,1);
 });

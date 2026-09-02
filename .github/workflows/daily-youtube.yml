@@ -2,8 +2,8 @@ name: Daily YouTube Preschool Updates
 
 on:
   schedule:
-    # 01:00 UTC = 06:30 Asia/Kolkata. GitHub schedules can be delayed.
-    - cron: '0 1 * * *'
+    # 06:30, 10:30, 14:30, 18:30 and 22:30 India time. GitHub may delay runs.
+    - cron: '0 1,5,9,13,17 * * *'
   workflow_dispatch:
 
 permissions:

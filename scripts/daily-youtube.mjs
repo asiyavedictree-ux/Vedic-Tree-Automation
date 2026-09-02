@@ -2,8 +2,16 @@ import { pathToFileURL } from 'node:url';
 
 const EXPECTED_HOST = 'axnlojkpcetilimwejxp.supabase.co';
 const KEYWORDS = ['preschool', 'kindergarten', 'classroom', 'teacher', 'kids activity', 'children activity', 'school celebration', 'school event', 'craft', 'learning activity', 'toddler'];
-const EXCLUDE = ['news', 'worksheet', 'alphabet learning', 'abc learning', 'nursery rhyme compilation', 'full movie', 'gaming'];
-export const QUERY = 'preschool classroom activity|kindergarten celebration|preschool teacher activity|kids school event|preschool craft -news -worksheet -alphabet';
+const EXCLUDE = ['news', 'full movie', 'gaming'];
+export const QUERY = 'preschool classroom activity|kindergarten games|preschool learning activity -news -gaming';
+
+export function indiaDay(now) {
+  return new Intl.DateTimeFormat('en-CA', {timeZone:'Asia/Kolkata',year:'numeric',month:'2-digit',day:'2-digit'}).format(now);
+}
+export function searchQueries() {
+  return [QUERY, 'preschool craft|kindergarten classroom games|preschool sensory activity -news -gaming',
+    'preschool celebration|kindergarten school event|preschool festival activity -news'];
+}
 
 export function configuration(env) {
   for (const key of ['SUPABASE_URL', 'SUPABASE_SERVICE_ROLE_KEY', 'YOUTUBE_API_KEY']) {
@@ -35,7 +43,7 @@ export function buildSignals(searchItems, videos, now = new Date()) {
     const s = video.snippet || item.snippet;
     const published = new Date(s?.publishedAt);
     const duration = durationSeconds(video.contentDetails?.duration);
-    if (!s?.title || !Number.isFinite(published.getTime()) || published > now || now - published > 7 * 86400000 || !(duration > 0 && duration <= 180)) continue;
+    if (!s?.title || !Number.isFinite(published.getTime()) || published > now || indiaDay(published) !== indiaDay(now) || !(duration > 0 && duration <= 180)) continue;
     const text = `${s.title} ${s.description || ''}`.toLowerCase();
     const topics = KEYWORDS.filter(word => text.includes(word));
     if (!topics.length || EXCLUDE.some(word => text.includes(word))) continue;
@@ -58,7 +66,7 @@ export function buildSignals(searchItems, videos, now = new Date()) {
       velocity_score: Math.min(100, Math.round(Math.log10(velocity + 1) * 30)),
       confidence_score: Math.min(100, Math.round(45 + Math.min(views / 1000, 25) + Math.min(engagement * 5, 30))),
       geographies: ['India'], topics, preschool_relevance_score: relevance,
-      qualified: relevance >= 60 && (views >= 1000 || velocity >= 20 || engagement >= 2),
+      qualified: relevance >= 60,
       relevance_reason: `Preschool short video. ${views} views, ${likes} likes, ${comments} comments, ${Math.round(velocity)} views/hour. Heuristic trend score, not an official viral ranking.`,
       raw_payload: { video_id: id, direct_video_url: url, thumbnail_url: s.thumbnails?.high?.url || s.thumbnails?.default?.url || '', description: s.description || '', statistics: video.statistics, content_details: video.contentDetails },
     });
@@ -114,14 +122,29 @@ export async function run(api, now = new Date(), log = console.log) {
     const started = await api.db('automation_runs', { method: 'POST', prefer: 'return=representation', body: { workflow_name: 'VT A0 - GitHub Daily YouTube Collector', owner: 'A0', started_at: now.toISOString(), status: 'RUNNING', processed_count: 0 } });
     runId = started?.[0]?.id;
     if (runId === undefined || runId === null) throw new Error('Automation run ID missing');
-    const search = await api.youtube('search', { part: 'snippet', type: 'video', maxResults: '25', order: 'date', publishedAfter: new Date(now - 7 * 86400000).toISOString(), regionCode: 'IN', relevanceLanguage: 'en', videoDuration: 'short', q: QUERY });
-    if (!Array.isArray(search.items) || !search.items.length) throw new Error('No YouTube results returned; dashboard freshness not confirmed');
+    const noMatches = async () => {
+      const finished = await api.db('automation_runs', {method:'PATCH', query:{id:`eq.${runId}`}, prefer:'return=representation', body:{status:'SUCCESS',ended_at:new Date().toISOString(),processed_count:0}});
+      if (finished?.[0]?.status !== 'SUCCESS') throw new Error('Could not verify empty collection run');
+      log('Search completed: no matching preschool videos published today yet. Older videos were not substituted.');
+      return {processed:0,newCandidates:0};
+    };
+    const search = {items: []};
+    for (const q of searchQueries(now)) {
+      const result = await api.youtube('search', { part: 'snippet', type: 'video', maxResults: '25', order: 'date', publishedAfter: new Date(`${indiaDay(now)}T00:00:00+05:30`).toISOString(), regionCode: 'IN', relevanceLanguage: 'en', videoDuration: 'short', q });
+      if (!Array.isArray(result.items)) throw new Error('Invalid YouTube search response');
+      search.items.push(...result.items);
+    }
+    if (!search.items.length) return await noMatches();
     const ids = [...new Set(search.items.map(i => i.id?.videoId).filter(id => /^[A-Za-z0-9_-]{11}$/.test(id || '')))];
     if (!ids.length) throw new Error('No valid YouTube video IDs');
-    const videos = await api.youtube('videos', { part: 'snippet,statistics,contentDetails', id: ids.join(',') });
-    if (!Array.isArray(videos.items)) throw new Error('Invalid YouTube statistics response');
+    const videos = {items: []};
+    for (let offset = 0; offset < ids.length; offset += 50) {
+      const result = await api.youtube('videos', { part: 'snippet,statistics,contentDetails', id: ids.slice(offset, offset + 50).join(',') });
+      if (!Array.isArray(result.items)) throw new Error('Invalid YouTube statistics response');
+      videos.items.push(...result.items);
+    }
     const records = buildSignals(search.items, videos.items, now);
-    if (!records.length) throw new Error('No relevant videos within three minutes found; no fresh content saved');
+    if (!records.length) return await noMatches();
     const filter = `in.(${records.map(r => r.signal_id).join(',')})`;
     const existing = await api.db('trend_signals', { query: { select: 'signal_id', signal_id: filter } });
     if (!Array.isArray(existing)) throw new Error('Could not verify existing signals');
